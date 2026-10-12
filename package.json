@@ -19,7 +19,9 @@
       "explorer": [
         {
           "id": "claudeTasksView",
-          "name": "Claude Tasks"
+          "name": "Claude Tasks",
+          "visibility": "visible",
+          "icon": "$(checklist)"
         }
       ]
     },

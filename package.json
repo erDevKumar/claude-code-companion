@@ -1,0 +1,57 @@
+{
+  "name": "claude-code-companion",
+  "displayName": "Claude Code Companion",
+  "description": "Task progress, ETA and rate-limit quota from a local Claude Code session.",
+  "version": "0.1.0",
+  "publisher": "erDevKumar",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "views": {
+      "explorer": [
+        {
+          "id": "claudeTasksView",
+          "name": "Claude Tasks"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claudeCompanion.showSocketPath",
+        "title": "Claude Companion: Show IPC Socket Path"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -p . -w"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/erDevKumar/claude-code-companion.git"
+  },
+  "bugs": {
+    "url": "https://github.com/erDevKumar/claude-code-companion/issues"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "status-bar",
+    "tasks",
+    "rate-limit"
+  ]
+}

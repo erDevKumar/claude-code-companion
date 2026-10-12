@@ -65,13 +65,17 @@ function session(firstGap, durations, total) {
   assert.strictEqual(e.confidence, "rough", "a wide spread is reported as rough");
 }
 
-// --- idle refreshes must not move the estimate --------------------------
+// --- idle refreshes must not corrupt the measured pace ------------------
+// The ETA itself SHOULD move as time passes (it counts down, then widens if
+// the task overruns). What must not happen is a phantom sample being recorded.
 {
   const s = session(5000, [5000, 5000], 10);
-  const before = s.est.estimate(3, 10).ms;
+  const samplesBefore = s.est.estimate(3, 10).samples;
   s.hold(60000); s.est.update(3, 10);
   s.hold(99000); s.est.update(3, 10);
-  assert.strictEqual(s.est.estimate(3, 10).ms, before, "idle pushes must not change the ETA");
+  const after = s.est.estimate(3, 10);
+  assert.strictEqual(after.samples, samplesBefore, "idle pushes must not add samples");
+  assert.ok(after.overdue, "159s idle on a 5s pace is an overrun");
 }
 
 // --- completion, and restart when the list shrinks ----------------------
@@ -83,6 +87,37 @@ function session(firstGap, durations, total) {
   s.hold(1000);
   s.est.update(1, 5); // list shrank => new session
   assert.strictEqual(s.est.estimate(1, 5), undefined, "restart clears samples");
+}
+
+// --- the estimate must decay in real time, not freeze at the last payload
+{
+  let now = 0;
+  const est = new EtaEstimator(() => now);
+  est.update(0, 10);
+  now = 10000; est.update(1, 10);              // startup, discarded
+  now = 15000; est.update(2, 10);              // sample: 5s
+  now = 20000; est.update(3, 10);              // sample: 5s
+
+  const atPayload = est.estimate(3, 10).ms;
+  now = 22500;                                  // 2.5s into the current task
+  const later = est.estimate(3, 10).ms;
+  assert.ok(later < atPayload, "ETA must shrink as the current task runs");
+
+  // A task running far past the average must widen the estimate, not keep
+  // promising the old pace — the number the user saw frozen at "~30s left".
+  now = 20000 + 8 * 60000;
+  const stalled = est.estimate(3, 10);
+  assert.ok(stalled.overdue, "overrun must be flagged");
+  assert.strictEqual(stalled.confidence, "rough", "an overrun is never confident");
+  assert.ok(stalled.ms > 8 * 60000, `stalled estimate must widen, got ${stalled.ms}ms`);
+  assert.ok(est.overrunMs() > 7 * 60000, "overrun time is reported");
+
+  // Once it completes, the estimate recovers instead of staying poisoned.
+  now = 20000 + 9 * 60000; est.update(4, 10);
+  now += 5000; est.update(5, 10);
+  const recovered = est.estimate(5, 10);
+  assert.strictEqual(recovered.overdue, false, "no longer overdue");
+  assert.ok(recovered.ms < 2 * 60000, `median shrugs off the stall, got ${recovered.ms}ms`);
 }
 
 // --- formatting rounds to a precision the estimate actually supports ----

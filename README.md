@@ -18,6 +18,8 @@ and a task list in the Explorer.
 - `[4/5] 80%` — completed / total and percentage, with a spinner while work is running
 - `(~3s left)` — the estimate (see [How the ETA works](#how-the-eta-works) below)
 - A trailing `?` — `(~2m left?)` — means too few or too erratic samples to lean on
+- Redraws every 60s, so the countdown is live rather than frozen at the last update
+- `(over by 3m)` on the final task means it has outrun the expected duration
 - Turns into `✓ [5/5] 100%` when everything completes
 - **Hover** shows the full task list plus what the ETA is based on
 - **Click** opens the Explorer
@@ -58,7 +60,26 @@ tasks accumulate the estimate settles and the label upgrades:
 
 Hover the item to see the grade and how many completed tasks back it.
 
-Two details that make it behave:
+**It is live, not a snapshot.** Both time-based values redraw every 60 seconds
+even when no new payload arrives, so they count down in real time instead of
+freezing at whatever the last update said.
+
+That matters most when a task stalls. If your pace has been ~5s per task and the
+current one has been running eight minutes, the old behaviour kept promising
+"~35s left" indefinitely. Now the elapsed time counts against the estimate, and
+once a task outruns its expected duration the estimate **widens** — because
+overrunning is evidence the measured pace no longer describes this session:
+
+| Time since last completion | Shown |
+|---|---|
+| at the payload | `(~35s left?)` |
+| +1 min, still running | `(~6m left?)` |
+| +5 min, still running | `(~30m left?)` |
+| task finally completes | `(~30s left?)` — re-settles |
+
+The median window means one stall does not poison the following estimates.
+
+Two more details that make it behave:
 
 - **The time before your first completed task is discarded.** That stretch is
   startup, thinking and tool calls — counting it as "one task's duration"
@@ -197,6 +218,12 @@ pretty-printed JSON blob is read as several broken frames.
 - **ETA looks wrong** — check the trailing `?` and the tooltip. A changing pace or
   a stalled task is reported as `rough` rather than hidden, because a stale
   number with no warning is worse than an honest rough one.
+- **ETA keeps growing** — that is a task running well past your recent average.
+  The estimate widens on purpose instead of repeating a figure the session has
+  already disproved; it re-settles once the task completes.
+- **Nothing moves for over a minute** — the bar redraws on a 60s timer, so a
+  countdown that never changes across several minutes means the extension host
+  is not running. Check **Output → Claude Companion**.
 
 ## Develop
 

@@ -2,23 +2,41 @@ import * as vscode from "vscode";
 import { Confidence, EtaEstimator, formatDuration } from "./etaEstimator";
 import { Payload } from "./protocol";
 
+/** Both displayed values are time-based, so redraw them on this cadence. */
+const TICK_MS = 60_000;
+
 export class StatusBarManager implements vscode.Disposable {
   private readonly tasks: vscode.StatusBarItem;
   private readonly quota: vscode.StatusBarItem;
   private readonly eta = new EtaEstimator();
+  private last: Payload | undefined;
+  private readonly timer: ReturnType<typeof setInterval>;
 
   constructor() {
     this.tasks = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
     this.tasks.command = "workbench.view.explorer";
     this.quota = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 99);
+
+    // "~2m left" and "resets in 2h" both decay in real time. Without this they
+    // would freeze at whatever the last payload said — a session that pauses on
+    // one long task would keep promising a time that had already passed.
+    this.timer = setInterval(() => this.redraw(), TICK_MS);
   }
 
   update(p: Payload): void {
-    this.renderTasks(p);
+    this.last = p;
+    this.renderTasks(p, true);
     this.renderQuota(p);
   }
 
-  private renderTasks(p: Payload): void {
+  /** Re-render the last payload against the current clock. Records no samples. */
+  private redraw(): void {
+    if (!this.last) return;
+    this.renderTasks(this.last, false);
+    this.renderQuota(this.last);
+  }
+
+  private renderTasks(p: Payload, fromPayload: boolean): void {
     const list = p.tasks ?? [];
     const total = p.total ?? list.length;
     const completed = p.completed ?? list.filter((t) => t.status === "completed").length;
@@ -28,15 +46,25 @@ export class StatusBarManager implements vscode.Disposable {
       return;
     }
 
-    this.eta.update(completed, total);
+    // Only real payloads carry progress. Feeding the estimator on a timer tick
+    // would record phantom intervals and wreck the pace it has measured.
+    if (fromPayload) {
+      this.eta.update(completed, total);
+    }
+
     const pct = Math.round((completed / total) * 100);
     const done = completed >= total;
     const icon = done ? "$(check)" : "$(sync~spin)";
 
     const est = done ? undefined : this.eta.estimate(completed, total);
     // "~" and a rounded figure already read as approximate; "?" marks the ones
-    // built on too few or too erratic samples to lean on.
-    const suffix = est ? ` (~${formatDuration(est.ms)} left${est.confidence === "rough" ? "?" : ""})` : "";
+    // built on too few or too erratic samples to lean on. An overrunning task
+    // reads "over by", because claiming time remains would be a lie.
+    const suffix = est
+      ? est.overdue && total - completed === 1
+        ? ` (over by ${formatDuration(this.eta.overrunMs())})`
+        : ` (~${formatDuration(est.ms)} left${est.confidence === "rough" ? "?" : ""})`
+      : "";
 
     this.tasks.text = `${icon} [${completed}/${total}] ${pct}%${suffix}`;
 
@@ -71,6 +99,7 @@ export class StatusBarManager implements vscode.Disposable {
   }
 
   dispose(): void {
+    clearInterval(this.timer);
     this.tasks.dispose();
     this.quota.dispose();
   }
@@ -87,9 +116,16 @@ function resetsIn(resetsAt?: number): string | undefined {
  * The disclaimer. The ETA is a projection from past task durations, never a
  * schedule, so the tooltip says so plainly and reports what it is based on.
  */
-function etaNote(est: { confidence: Confidence; samples: number } | undefined): string {
+function etaNote(est: { confidence: Confidence; samples: number; overdue: boolean } | undefined): string {
   if (!est) {
     return "ETA: not yet — it needs one completed task to measure.";
+  }
+  if (est.overdue) {
+    return [
+      "ETA: the current task is already running longer than your recent",
+      "average, so the estimate no longer holds. It will re-settle once",
+      "this task finishes.",
+    ].join("\n");
   }
   const basis = `${est.samples} completed task${est.samples === 1 ? "" : "s"}`;
   const grade: Record<Confidence, string> = {

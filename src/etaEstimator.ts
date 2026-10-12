@@ -7,6 +7,9 @@ const ROUGH_SAMPLES = 3;
 /** Spread (range / median) above this means the pace is too erratic to trust. */
 const NOISY_SPREAD = 1.5;
 
+/** Running this many times longer than expected means the estimate has broken down. */
+const OVERRUN_FACTOR = 1.5;
+
 export type Confidence = "none" | "rough" | "fair" | "good";
 
 export interface Estimate {
@@ -14,6 +17,8 @@ export interface Estimate {
   confidence: Confidence;
   /** Completed-task durations backing it. Shown in the tooltip. */
   samples: number;
+  /** The current task has already outrun its expected duration. */
+  overdue: boolean;
 }
 
 /**
@@ -81,15 +86,40 @@ export class EtaEstimator {
   estimate(completed: number, total: number): Estimate | undefined {
     if (total <= 0) return undefined;
     const left = Math.max(0, total - completed);
-    if (left === 0) return { ms: 0, confidence: "good", samples: this.durations.length };
+    if (left === 0) {
+      return { ms: 0, confidence: "good", samples: this.durations.length, overdue: false };
+    }
     if (this.durations.length === 0) return undefined;
 
     const per = median(this.durations);
+
+    // Time already spent on the task in flight. Without this the estimate is a
+    // snapshot from the last completion: it would still promise "~35s left"
+    // after the current task had already run for eight minutes.
+    const elapsed = this.lastStamp === undefined ? 0 : Math.max(0, this.now() - this.lastStamp);
+    const overdue = elapsed > per * OVERRUN_FACTOR;
+
+    // An overrunning task is evidence against the measured pace, not just a
+    // slow instance of it: a 5s average with 8 minutes elapsed means the pace
+    // no longer describes this session. Treat the time already spent as the
+    // best available floor for what work now costs, so the estimate widens
+    // instead of insisting on a number the session has already disproved.
+    const effectivePer = overdue ? Math.max(per, elapsed) : per;
+    const remainingOnCurrent = Math.max(0, effectivePer - elapsed);
+    const ms = remainingOnCurrent + (left - 1) * effectivePer;
+
     return {
-      ms: left * per,
-      confidence: this.confidence(per),
+      ms,
+      confidence: overdue ? "rough" : this.confidence(per),
       samples: this.durations.length,
+      overdue,
     };
+  }
+
+  /** How long the in-flight task has run beyond its expected duration, in ms. */
+  overrunMs(): number {
+    if (this.durations.length === 0 || this.lastStamp === undefined) return 0;
+    return Math.max(0, this.now() - this.lastStamp - median(this.durations));
   }
 
   private confidence(per: number): Confidence {

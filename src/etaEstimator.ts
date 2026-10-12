@@ -1,26 +1,49 @@
-const ALPHA = 0.3;
+/** Samples kept for the running median. Small enough to track a changing pace. */
+const WINDOW = 5;
+
+/** Below this many samples the estimate is a guess and is labelled as one. */
+const ROUGH_SAMPLES = 3;
+
+/** Spread (range / median) above this means the pace is too erratic to trust. */
+const NOISY_SPREAD = 1.5;
+
+export type Confidence = "none" | "rough" | "fair" | "good";
+
+export interface Estimate {
+  ms: number;
+  confidence: Confidence;
+  /** Completed-task durations backing it. Shown in the tooltip. */
+  samples: number;
+}
 
 /**
- * EMA of wall-clock duration per completed task.
+ * Estimates time remaining from how long completed tasks actually took.
  *
- * Only advances on a rising `completed` count: statusLine re-fires on every
- * session event, so sampling every push would flood the average with ~0ms
- * intervals and drive the ETA to zero.
+ * Uses a median of the last few durations rather than a mean/EMA: one stalled
+ * task would drag a mean for a long time, and in a Claude Code session stalls
+ * are common (a long tool call, a big file read, waiting on a build).
+ *
+ * The interval before the FIRST completion is discarded. It covers startup,
+ * thinking and tool calls that happened before any task finished, so counting
+ * it as "one task's duration" inflated the first ETA several-fold — and with an
+ * EMA that first bad sample then polluted every later estimate.
+ *
+ * Accuracy improves as a session runs: 1 sample is reported as `rough`, and
+ * confidence rises as samples accumulate and their spread narrows.
  */
 export class EtaEstimator {
-  private ema: number | undefined;
+  private readonly durations: number[] = [];
   private lastCompleted = 0;
   private lastStamp: number | undefined;
+  private sawFirstCompletion = false;
 
   constructor(private readonly now: () => number = Date.now) {}
 
   update(completed: number, total: number): void {
-    if (total <= 0 || completed < 0) {
-      return;
-    }
+    if (total <= 0 || completed < 0) return;
     const t = this.now();
 
-    // Restart (new session, or list shrank/reset) — rebaseline, don't sample.
+    // List shrank — new session or a reset. Rebaseline instead of sampling.
     if (completed < this.lastCompleted) {
       this.reset();
       this.lastCompleted = completed;
@@ -30,41 +53,78 @@ export class EtaEstimator {
 
     const advanced = completed - this.lastCompleted;
     if (advanced === 0) {
-      // First sighting still needs a clock origin to measure the next step from.
+      // statusLine re-fires constantly; only establish a clock origin.
       this.lastStamp ??= t;
       return;
     }
 
     if (this.lastStamp !== undefined) {
-      const perTask = (t - this.lastStamp) / advanced;
-      if (perTask > 0) {
-        this.ema = this.ema === undefined ? perTask : ALPHA * perTask + (1 - ALPHA) * this.ema;
+      if (!this.sawFirstCompletion) {
+        // Startup interval, not task work. Discard it and start the clock here.
+        this.sawFirstCompletion = true;
+      } else {
+        const perTask = (t - this.lastStamp) / advanced;
+        if (perTask > 0) {
+          // A burst of N completions in one push gives N copies of the same
+          // average, which would wrongly dominate the window. Record one.
+          this.durations.push(perTask);
+          if (this.durations.length > WINDOW) this.durations.shift();
+        }
       }
     }
+
     this.lastCompleted = completed;
     this.lastStamp = t;
   }
 
-  /** Milliseconds remaining, or undefined when not yet estimable. */
-  remainingMs(completed: number, total: number): number | undefined {
+  /** Remaining time with a confidence grade, or undefined when not estimable. */
+  estimate(completed: number, total: number): Estimate | undefined {
     if (total <= 0) return undefined;
     const left = Math.max(0, total - completed);
-    if (left === 0) return 0;
-    if (this.ema === undefined) return undefined;
-    return left * this.ema;
+    if (left === 0) return { ms: 0, confidence: "good", samples: this.durations.length };
+    if (this.durations.length === 0) return undefined;
+
+    const per = median(this.durations);
+    return {
+      ms: left * per,
+      confidence: this.confidence(per),
+      samples: this.durations.length,
+    };
+  }
+
+  private confidence(per: number): Confidence {
+    const n = this.durations.length;
+    if (n < ROUGH_SAMPLES) return "rough";
+
+    // Range relative to the median: how consistent the pace has been.
+    const sorted = [...this.durations].sort((a, b) => a - b);
+    const spread = per > 0 ? (sorted[sorted.length - 1] - sorted[0]) / per : 0;
+    if (spread > NOISY_SPREAD) return "rough";
+    return n >= WINDOW && spread < NOISY_SPREAD / 2 ? "good" : "fair";
   }
 
   reset(): void {
-    this.ema = undefined;
+    this.durations.length = 0;
     this.lastCompleted = 0;
     this.lastStamp = undefined;
+    this.sawFirstCompletion = false;
   }
 }
 
-/** "3m", "1h 5m", "12s" — compact enough for a status bar. */
+function median(xs: number[]): number {
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = s.length >> 1;
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+/**
+ * Rounds to a precision the estimate actually supports — "~2m" rather than
+ * "1m 53s", which would imply accuracy that isn't there.
+ */
 export function formatDuration(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000));
-  if (s < 60) return `${s}s`;
+  if (s < 10) return "<10s";
+  if (s < 60) return `${Math.round(s / 5) * 5}s`;
   const m = Math.round(s / 60);
   if (m < 60) return `${m}m`;
   const h = Math.floor(m / 60);

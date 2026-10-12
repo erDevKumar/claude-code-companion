@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { EtaEstimator, formatDuration } from "./etaEstimator";
+import { Confidence, EtaEstimator, formatDuration } from "./etaEstimator";
 import { Payload } from "./protocol";
 
 export class StatusBarManager implements vscode.Disposable {
@@ -33,13 +33,17 @@ export class StatusBarManager implements vscode.Disposable {
     const done = completed >= total;
     const icon = done ? "$(check)" : "$(sync~spin)";
 
-    const ms = this.eta.remainingMs(completed, total);
-    const suffix = done ? "" : ms === undefined ? "" : ` (~${formatDuration(ms)} left)`;
+    const est = done ? undefined : this.eta.estimate(completed, total);
+    // "~" and a rounded figure already read as approximate; "?" marks the ones
+    // built on too few or too erratic samples to lean on.
+    const suffix = est ? ` (~${formatDuration(est.ms)} left${est.confidence === "rough" ? "?" : ""})` : "";
 
     this.tasks.text = `${icon} [${completed}/${total}] ${pct}%${suffix}`;
-    this.tasks.tooltip = list.length
-      ? list.map((t) => `${glyph(t.status)} ${t.content}`).join("\n")
-      : `${completed} of ${total} complete`;
+
+    const lines = list.length
+      ? list.map((t) => `${glyph(t.status)} ${t.content}`)
+      : [`${completed} of ${total} complete`];
+    this.tasks.tooltip = [...lines, "", etaNote(est)].join("\n");
     this.tasks.show();
   }
 
@@ -77,6 +81,28 @@ function resetsIn(resetsAt?: number): string | undefined {
   if (!resetsAt) return undefined;
   const ms = resetsAt * 1000 - Date.now();
   return ms > 0 ? formatDuration(ms) : undefined;
+}
+
+/**
+ * The disclaimer. The ETA is a projection from past task durations, never a
+ * schedule, so the tooltip says so plainly and reports what it is based on.
+ */
+function etaNote(est: { confidence: Confidence; samples: number } | undefined): string {
+  if (!est) {
+    return "ETA: not yet — it needs one completed task to measure.";
+  }
+  const basis = `${est.samples} completed task${est.samples === 1 ? "" : "s"}`;
+  const grade: Record<Confidence, string> = {
+    rough: "rough guess",
+    fair: "fair estimate",
+    good: "steady pace",
+    none: "estimate",
+  };
+  return [
+    `ETA: estimated, not exact (${grade[est.confidence]}, from ${basis}).`,
+    "It projects your recent pace onto the remaining tasks and gets more",
+    "accurate the longer the session runs.",
+  ].join("\n");
 }
 
 function glyph(s: string): string {

@@ -4,25 +4,27 @@ A VS Code extension that surfaces a local [Claude Code](https://claude.com/claud
 session in the editor: task progress with a live ETA, your 5-hour rate-limit quota,
 and a task list in the Explorer.
 
-<img src="docs/status-bar.png" alt="Status bar showing task progress with ETA and quota" width="543">
+<img src="docs/status-bar.png" alt="Status bar showing task progress with ETA and quota" width="395">
 
-> Real screenshots of the extension running in VS Code.
+> Real screenshots of the extension running in VS Code. The `?` after the ETA is
+> the extension telling you it does not have enough samples yet to be confident.
 
 ## What you get
 
 ### 1. Task progress bar (bottom-left status bar)
 
-<img src="docs/status-tasks.png" alt="Task progress status bar item" width="228">
+<img src="docs/status-tasks.png" alt="Task progress status bar item" width="160">
 
 - `[4/5] 80%` — completed / total and percentage, with a spinner while work is running
-- `(~3s left)` — a live ETA from an exponential moving average of how long your
-  recent tasks took, so it settles instead of jumping around
+- `(~3s left)` — the estimate (see [How the ETA works](#how-the-eta-works) below)
+- A trailing `?` — `(~2m left?)` — means too few or too erratic samples to lean on
 - Turns into `✓ [5/5] 100%` when everything completes
-- **Hover** shows the full task list; **click** opens the Explorer
+- **Hover** shows the full task list plus what the ETA is based on
+- **Click** opens the Explorer
 
 ### 2. Quota bar (next to it)
 
-<img src="docs/status-quota.png" alt="Quota status bar item" width="311">
+<img src="docs/status-quota.png" alt="Quota status bar item" width="210">
 
 - Your claude.ai **5-hour rate-limit window**: percent used and time until reset
 - Background turns **orange at 75%**, **red at 90%** — glanceable before you hit the wall
@@ -31,10 +33,53 @@ and a task list in the Explorer.
 
 ### 3. "Claude Tasks" in the Explorer sidebar
 
-<img src="docs/tasks-view.png" alt="Claude Tasks tree view in the Explorer" width="650">
+<img src="docs/tasks-view.png" alt="Claude Tasks tree view in the Explorer" width="600">
 
 - Every task with a live status icon: ✓ completed, spinner for in-progress, ○ pending
 - Updates in real time as payloads arrive — no refresh button, no polling
+
+## How the ETA works
+
+> **The ETA is a guess, not a schedule.** It projects the pace of your recently
+> completed tasks onto the ones left. It cannot know that the next task is a
+> one-line edit or a twenty-minute build, so treat it as a rough horizon — the
+> `~` and the rounded figure are there to say so.
+
+**It gets more accurate the longer a session runs.** With one completed task
+there is a single measurement and the estimate is labelled a rough guess; as
+tasks accumulate the estimate settles and the label upgrades:
+
+| Shown | Meaning |
+|---|---|
+| no ETA | Nothing measured yet — needs one completed task |
+| `(~2m left?)` | **Rough** — fewer than 3 samples, or a very uneven pace |
+| `(~2m left)` | **Fair** — 3+ consistent samples |
+| `(~2m left)` + "steady pace" in the tooltip | **Good** — a full window of consistent samples |
+
+Hover the item to see the grade and how many completed tasks back it.
+
+Two details that make it behave:
+
+- **The time before your first completed task is discarded.** That stretch is
+  startup, thinking and tool calls — counting it as "one task's duration"
+  inflated the first ETA several-fold, which is the number you see most.
+- **It uses a median of the last 5 durations, not an average.** One stalled task
+  (a long build, a big file read) would drag an average for the rest of the
+  session; a median shrugs it off and the item flags the spread as `rough`.
+
+Measured against simulated sessions with a 30s startup, mean error over the
+session and error at the end:
+
+| Session shape | Mean error | Final error |
+|---|---|---|
+| Steady pace | 0% | 0% |
+| One long stall mid-run | 25% | 0% |
+| Very noisy durations | 30% | 29% |
+| Pace changing throughout | 63–125% | 40–50% |
+
+A pace that changes monotonically throughout is the worst case for any
+pace-based estimate — it is extrapolating from a trend that keeps moving, which
+is exactly when the `?` and the tooltip tell you not to trust the number.
 
 ## How it works
 
@@ -106,10 +151,12 @@ malformed. Anything that writes this file — a hook, a script, your own agent �
 drives the progress bar and the tree. Statuses are `pending`, `in_progress`,
 `completed`.
 
-**3. Read the bar.** The ETA appears once the first task completes (the average
-needs one real interval) and only advances when the completed count rises, so
-idle refreshes cannot decay it toward zero. With an empty or absent list, the task
-bar and tree hide rather than showing zeros.
+**3. Read the bar.** The ETA appears after the *second* completed task — the first
+one only starts the clock, since the time before it is startup rather than task
+work. It advances only when the completed count rises, so idle refreshes cannot
+decay it toward zero. With an empty or absent list, the task bar and tree hide
+rather than showing zeros. See [How the ETA works](#how-the-eta-works) for what
+the `?` means and how far to trust the number.
 
 ### Push a test payload by hand
 
@@ -145,8 +192,11 @@ pretty-printed JSON blob is read as several broken frames.
   API response of a session.
 - **Two VS Code windows** — one window owns the socket; the other logs
   `Socket already served by another window` and stays idle rather than stealing it.
-- **No ETA yet** — it needs one completed task to measure. `[0/5] 0%` with no ETA
-  is correct at the start.
+- **No ETA yet** — it needs two completed tasks: the first starts the clock, the
+  second provides the first real measurement. No ETA early on is correct.
+- **ETA looks wrong** — check the trailing `?` and the tooltip. A changing pace or
+  a stalled task is reported as `rough` rather than hidden, because a stale
+  number with no warning is worse than an honest rough one.
 
 ## Develop
 
